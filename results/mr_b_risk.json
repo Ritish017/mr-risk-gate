@@ -1,0 +1,44 @@
+{
+  "score": 57,
+  "level": "MEDIUM",
+  "findings": [
+    {
+      "rule": "sensitive-path",
+      "points": 25,
+      "reason": "touches money calculation (tinyledger/billing.py)",
+      "path": "tinyledger/billing.py",
+      "line": null,
+      "severity": "medium"
+    },
+    {
+      "rule": "no-test-change",
+      "points": 20,
+      "reason": "source changed with no test changes: tinyledger/billing.py",
+      "path": null,
+      "line": null,
+      "severity": "medium"
+    },
+    {
+      "rule": "float-money",
+      "points": 10,
+      "reason": "float-money in added line",
+      "path": "tinyledger/billing.py",
+      "line": 56,
+      "severity": "medium"
+    },
+    {
+      "rule": "todo",
+      "points": 2,
+      "reason": "todo in added line",
+      "path": "tinyledger/billing.py",
+      "line": 55,
+      "severity": "low"
+    }
+  ],
+  "files_changed": 1,
+  "lines_added": 11,
+  "lines_removed": 0,
+  "untested_sources": [
+    "tinyledger/billing.py"
+  ]
+}
