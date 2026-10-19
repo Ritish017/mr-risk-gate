@@ -1,0 +1,109 @@
+# Pipeline Medic — custom flow (GitLab Duo Agent Platform, flow registry v1)
+# Trigger: "Pipeline events" -> Run when: Failed.
+# The goal is the pipeline webhook payload (JSON). Trigger events require a human
+# actor, so pipelines started by the medic's own commits cannot re-trigger it.
+version: "v1"
+environment: ambient
+
+components:
+  - name: "diagnose"
+    type: AgentComponent
+    prompt_id: "diagnose_prompt"
+    inputs:
+      - from: "context:project_id"
+        as: "project_id"
+      - from: "context:goal"
+        as: "pipeline_event"
+    toolset:
+      - "get_pipeline_failing_jobs"
+      - "get_job_logs"
+      - "get_merge_request"
+      - "read_file"
+      - "run_command"
+    max_cycles: 25
+    ui_log_events:
+      - "on_agent_final_answer"
+      - "on_tool_execution_success"
+      - "on_tool_execution_failed"
+
+  - name: "remediate"
+    type: AgentComponent
+    prompt_id: "remediate_prompt"
+    inputs:
+      - from: "context:project_id"
+        as: "project_id"
+      - from: "context:goal"
+        as: "pipeline_event"
+      - from: "context:diagnose.final_answer"
+        as: "diagnosis"
+    toolset:
+      - "read_file"
+      - "edit_file"
+      - "run_command"
+      - "create_commit"
+      - "create_merge_request_note"
+      - "create_issue"
+    max_cycles: 30
+    ui_log_events:
+      - "on_agent_final_answer"
+      - "on_tool_execution_success"
+      - "on_tool_execution_failed"
+
+prompts:
+  - prompt_id: "diagnose_prompt"
+    name: "Pipeline Medic - diagnose"
+    unit_primitives: []
+    prompt_template:
+      system: |
+        You diagnose failed GitLab CI/CD pipelines for this project. Be precise and evidence-based.
+        1. From the pipeline event JSON take object_attributes.id (pipeline ID), object_attributes.ref,
+           and merge_request.iid if present.
+        2. Use get_pipeline_failing_jobs, then get_job_logs for each failing job (read the last ~200 lines).
+        3. Classify the root cause as exactly one of: TEST_REGRESSION, LINT, DEPENDENCY, CONFIG, INFRA.
+           INFRA = runner, network, quota or identity-verification problems that code cannot fix.
+        4. Your final answer is a compact JSON object with keys: category, pipeline_id, ref, mr_iid
+           (or null), failing_jobs, evidence (quote the decisive log lines), suspected_files, fixable
+           (true only for TEST_REGRESSION, LINT or DEPENDENCY when the fix is small and local).
+      user: |
+        Project ID: {{project_id}}
+        Pipeline event:
+        {{pipeline_event}}
+    params:
+      timeout: 300
+
+  - prompt_id: "remediate_prompt"
+    name: "Pipeline Medic - remediate"
+    unit_primitives: []
+    prompt_template:
+      system: |
+        You act on a pipeline diagnosis. Rules:
+        - Never commit to the default branch. Only commit to the failing ref when it is a merge request
+          source branch (mr_iid is not null).
+        - Only fix when fixable is true. Keep the change minimal; never delete or skip tests to go green;
+          never edit riskgate.json or .gitlab-ci.yml.
+        - Before committing, check out the ref, apply the fix, and run `python -m pytest -q` (and
+          `python -m compileall -q riskgate tinyledger` for LINT) to prove it.
+        Actions:
+        - fixable and MR: commit with create_commit (message "fix(ci): <summary>"), then post an MR note
+          with the diagnosis, the diff summary and the local test result.
+        - not fixable, or no MR: do not commit. If there is an MR, post the diagnosis as an MR note;
+          otherwise create an issue titled "Pipeline <id> failed: <category>" with the evidence and a
+          suggested next step.
+        Final answer: what you did, in two sentences.
+      user: |
+        Project ID: {{project_id}}
+        Diagnosis:
+        {{diagnosis}}
+        Original pipeline event:
+        {{pipeline_event}}
+    params:
+      timeout: 600
+
+routers:
+  - from: "diagnose"
+    to: "remediate"
+  - from: "remediate"
+    to: "end"
+
+flow:
+  entry_point: "diagnose"
