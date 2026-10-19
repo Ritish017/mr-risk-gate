@@ -1,0 +1,228 @@
+# MR Risk Gate — CI/CD pipeline.
+# Stages map to GitLab's DevSecOps lifecycle; the Duo flows in .gitlab/duo/flows/
+# act on what these jobs produce (risk.json, junit.xml, job logs).
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+include:
+  - template: Jobs/SAST.gitlab-ci.yml
+  - template: Jobs/Secret-Detection.gitlab-ci.yml
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  AST_ENABLE_MR_PIPELINES: "true"   # let the security templates run in MR pipelines
+
+stages: [lint, test, secure, risk, package, deploy, monitor, release, govern]
+
+default:
+  image: python:3.12
+  cache:
+    key: pip-$CI_JOB_IMAGE
+    paths: [.cache/pip]
+  interruptible: true
+
+# ---------- verify ----------
+lint:
+  stage: lint
+  script:
+    - python -m compileall -q riskgate tinyledger tests
+    - python -m riskgate --version
+
+unit_tests:
+  stage: test
+  before_script:
+    - pip install --quiet pytest pyyaml
+  script:
+    - python -m pytest -q --junitxml=junit.xml
+  artifacts:
+    when: always
+    paths: [junit.xml]
+    reports:
+      junit: junit.xml
+
+# ---------- secure ----------
+# semgrep-sast and secret_detection come from the included templates (stage: test).
+flow_config_check:
+  stage: secure
+  before_script:
+    - pip install --quiet pytest pyyaml
+  script:
+    - python -m pytest -q tests/test_flows.py
+  rules:
+    - changes: [".gitlab/duo/**/*", "tests/test_flows.py"]
+
+# ---------- risk (the gate the Duo flow reads) ----------
+mr_risk_score:
+  stage: risk
+  variables:
+    GIT_DEPTH: "0"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - python -m riskgate score --base "$CI_MERGE_REQUEST_DIFF_BASE_SHA" --head HEAD
+        --json-out risk.json --md-out risk.md --dotenv-out risk.env
+    - python -m riskgate testgaps --base "$CI_MERGE_REQUEST_DIFF_BASE_SHA" --head HEAD
+  artifacts:
+    paths: [risk.json, risk.md]
+    reports:
+      dotenv: risk.env
+    expose_as: "MR risk report"
+
+# Test proof: plant bugs on the MR's changed lines and check the tests catch them.
+mutation_proof:
+  stage: risk
+  variables:
+    GIT_DEPTH: "0"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes: ["**/*.py"]
+  before_script:
+    - pip install --quiet pytest
+  script:
+    - python -m riskgate mutate --base "$CI_MERGE_REQUEST_DIFF_BASE_SHA" --head HEAD
+        --json-out mutation.json --md-out mutation.md
+  artifacts:
+    when: always
+    paths: [mutation.json, mutation.md]
+    expose_as: "Test proof"
+
+main_risk_score:
+  stage: risk
+  variables:
+    GIT_DEPTH: "5"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - python -m riskgate score --base HEAD~1 --head HEAD --json-out risk.json --md-out risk.md
+  artifacts:
+    paths: [risk.json, risk.md]
+
+# ---------- package ----------
+build_wheel:
+  stage: package
+  script:
+    - pip wheel . --no-deps -w dist
+    - ls -l dist
+  artifacts:
+    paths: [dist/]
+
+publish_package:
+  stage: package
+  needs: [build_wheel]
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - pip install --quiet twine
+    - TWINE_PASSWORD="$CI_JOB_TOKEN" TWINE_USERNAME=gitlab-ci-token
+      python -m twine upload --repository-url "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/pypi" dist/*
+
+# ---------- deploy ----------
+# Ephemeral staging: boot the service inside the job and smoke-test it.
+staging_smoke:
+  stage: deploy
+  script:
+    - python -m tinyledger.server &
+    - python -m riskgate probe http://127.0.0.1:8080/health --expect-text '"ok"' --retries 10 --backoff 1
+    - >
+      python -c "import json,urllib.request;
+      r=urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8080/invoice',
+      data=json.dumps({'items':[{'description':'plan','unit_price':'100.00','quantity':2}],'discount_percent':'10'}).encode(),
+      headers={'Content-Type':'application/json'}));
+      body=json.load(r); print(body); assert body['total']=='212.40', body"
+
+# Production = the risk ledger on GitLab Pages. Manual: a human approves the outcome.
+pages:
+  stage: deploy
+  needs:
+    - job: main_risk_score
+      artifacts: true
+    - job: unit_tests
+      artifacts: false
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+  environment:
+    name: production
+    url: $CI_PAGES_URL
+  script:
+    - python -m riskgate ledger --report "$CI_COMMIT_SHORT_SHA=risk.json"
+        --history "$CI_PAGES_URL/ledger.json" --out public
+  artifacts:
+    paths: [public]
+
+# ---------- monitor ----------
+post_deploy_probe:
+  stage: monitor
+  needs: [pages]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - >-
+      python -m riskgate probe "$CI_PAGES_URL/health.json" --expect-text '"status": "ok"'
+      --retries 12 --backoff 15
+
+# ---------- release ----------
+release_notes:
+  stage: release
+  variables:
+    GIT_DEPTH: "0"
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - PREV=$(git describe --tags --abbrev=0 "$CI_COMMIT_TAG^" 2>/dev/null || git rev-list --max-parents=0 HEAD)
+    - git log --format=%s "$PREV..$CI_COMMIT_TAG" > commits.txt
+    - python -m riskgate notes --version "$CI_COMMIT_TAG" --commits commits.txt > release_notes.md
+    - cat release_notes.md
+  artifacts:
+    paths: [release_notes.md]
+
+create_release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs: [release_notes]
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - echo "Creating release $CI_COMMIT_TAG"
+  release:
+    tag_name: $CI_COMMIT_TAG
+    name: "riskgate $CI_COMMIT_TAG"
+    description: ./release_notes.md
+
+# ---------- govern ----------
+evidence_bundle:
+  stage: govern
+  when: always
+  needs:
+    - job: unit_tests
+      artifacts: true
+    - job: mr_risk_score
+      optional: true
+      artifacts: true
+    - job: main_risk_score
+      optional: true
+      artifacts: true
+    - job: mutation_proof
+      optional: true
+      artifacts: true
+    - job: secret_detection
+      optional: true
+      artifacts: true
+    - job: semgrep-sast
+      optional: true
+      artifacts: true
+  script:
+    - python -m riskgate evidence --risk risk.json --junit junit.xml
+        --security gl-secret-detection-report.json --security gl-sast-report.json
+        --mutation mutation.json --out evidence.md
+  artifacts:
+    when: always
+    paths: [evidence.md]
+    expose_as: "Change evidence"
