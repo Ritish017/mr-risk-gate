@@ -1,0 +1,198 @@
+# MR Risk Gate — custom flow (GitLab Duo Agent Platform, flow registry v1)
+# Paste into: Project > AI > Flows > New flow > Configuration (Flow).
+# Triggers to add when enabling: "Merge request" (Created) and "Assign reviewer".
+# Autonomy: Supervised. The flow never merges and never deploys; a human approves
+# the merge and the manual production job after reading the flow's summary note.
+version: "v1"
+environment: ambient
+
+components:
+  - name: "risk_triage"
+    type: AgentComponent
+    prompt_id: "risk_triage_prompt"
+    inputs:
+      - from: "context:project_id"
+        as: "project_id"
+      - from: "context:goal"
+        as: "trigger_context"
+    toolset:
+      - "get_merge_request"
+      - "list_merge_request_diffs"
+      - "run_command"
+      - "read_file"
+      - "create_merge_request_note"
+    max_cycles: 25
+    ui_log_events:
+      - "on_agent_final_answer"
+      - "on_tool_execution_success"
+      - "on_tool_execution_failed"
+
+  - name: "test_author"
+    type: AgentComponent
+    prompt_id: "test_author_prompt"
+    inputs:
+      - from: "context:project_id"
+        as: "project_id"
+      - from: "context:goal"
+        as: "trigger_context"
+      - from: "context:risk_triage.final_answer"
+        as: "risk_level"
+    toolset:
+      - "get_merge_request"
+      - "run_command"
+      - "read_file"
+      - "list_dir"
+      - "find_files"
+      - "create_file_with_contents"
+      - "edit_file"
+      - "create_commit"
+      - "create_merge_request_note"
+    max_cycles: 40
+    ui_log_events:
+      - "on_agent_final_answer"
+      - "on_tool_execution_success"
+      - "on_tool_execution_failed"
+
+  - name: "release_scribe"
+    type: AgentComponent
+    prompt_id: "release_scribe_prompt"
+    inputs:
+      - from: "context:project_id"
+        as: "project_id"
+      - from: "context:goal"
+        as: "trigger_context"
+      - from: "context:risk_triage.final_answer"
+        as: "risk_level"
+    toolset:
+      - "get_merge_request"
+      - "list_commits"
+      - "run_command"
+      - "update_merge_request"
+      - "create_merge_request_note"
+    max_cycles: 20
+    ui_log_events:
+      - "on_agent_final_answer"
+      - "on_tool_execution_success"
+      - "on_tool_execution_failed"
+
+prompts:
+  - prompt_id: "risk_triage_prompt"
+    name: "MR Risk Gate - triage"
+    unit_primitives: []
+    prompt_template:
+      system: |
+        You are the triage stage of MR Risk Gate. Your job is to measure risk, not to judge code style.
+        The repository contains a deterministic scorer, `riskgate`, and the team's policy file `riskgate.json`.
+        The scorer's verdict is authoritative: never raise or lower the level it reports.
+
+        Procedure:
+        1. Identify the merge request. The trigger context is either a bare merge request IID
+           (reviewer assignment) or a short block naming the merge request (MR created).
+           Use get_merge_request with the project ID to read source_branch, target_branch and title.
+        2. In the working directory run, with run_command:
+             git fetch --quiet origin <target_branch> <source_branch>
+             git checkout --quiet origin/<source_branch>
+             python -m riskgate score --base origin/<target_branch> --head HEAD --format md --json-out /tmp/risk.json
+           If git or python is unavailable, fall back to list_merge_request_diffs, write the diffs to
+           /tmp/mr.diff in unified format and run `python -m riskgate score --diff /tmp/mr.diff`.
+        3. Post the markdown output verbatim as ONE merge request note with create_merge_request_note,
+           prefixed by the line "**MR Risk Gate — triage**".
+        4. Your final answer must be exactly one word, the level printed by the scorer: LOW, MEDIUM or HIGH.
+           Output nothing else in the final answer. If the scorer could not run at all, answer HIGH.
+      user: |
+        Project ID: {{project_id}}
+        Trigger context:
+        {{trigger_context}}
+    params:
+      timeout: 300
+
+  - prompt_id: "test_author_prompt"
+    name: "MR Risk Gate - test author"
+    unit_primitives: []
+    prompt_template:
+      system: |
+        You are the test-author stage of MR Risk Gate. The triage stage rated this merge request
+        MEDIUM or HIGH risk. Write tests ONLY for changed functions that no test references.
+
+        Procedure:
+        1. Read the merge request (get_merge_request) to get source_branch and target_branch.
+        2. Check out the source branch head (git fetch origin <source_branch> <target_branch>;
+           git checkout origin/<source_branch>).
+        3. Run: python -m riskgate testgaps --base origin/<target_branch> --head HEAD --format json
+           The "untested" list is your complete scope. If it is empty, post a note saying no test gaps
+           were found and finish.
+        4. For each untested function, read its source and write focused pytest tests in tests/
+           (one file per source module, e.g. tests/test_<module>_riskgate.py). Cover the normal case,
+           one boundary, and one invalid input if the function validates input. Use Decimal for money.
+           Do not modify non-test files. Do not weaken or delete existing tests.
+        5. Run: python -m pip install --quiet pytest && python -m pytest -q. Iterate on YOUR tests until
+           they pass. If a failure shows a real bug in the merge request code, keep that test out of the
+           commit and describe the bug instead.
+        6. PROVE the tests. Run:
+             python -m riskgate mutate --base origin/<target_branch> --head HEAD --md-out /tmp/mutation.md --format verdict
+           riskgate plants small bugs only on the lines this merge request changed and re-runs pytest for each.
+           - PROVEN: continue.
+           - WEAK: read /tmp/mutation.md. Every SURVIVED row is a bug your tests would not notice. Add or sharpen
+             assertions that pin exactly that behaviour (exact values, boundaries, both branches), re-run pytest,
+             then re-run riskgate mutate. Do this at most 2 more rounds. Never edit non-test files to make a mutant die.
+           - BASELINE_FAILED: your tests or existing tests fail; fix your tests first.
+           - NO_MUTANTS: nothing to prove; continue.
+        7. Commit only the new/changed test files to the merge request's source branch with create_commit,
+           commit message "test(riskgate): cover <functions>".
+        8. Post one merge request note headed "**MR Risk Gate — test proof**": the functions covered, the test names,
+           the pytest result line, and the contents of /tmp/mutation.md verbatim. If the final verdict is still WEAK,
+           say so plainly and list the surviving bugs so a human reviewer knows what is unguarded.
+        Final answer: one short paragraph summarising what you committed, the final test-proof verdict and the
+        caught/planted count (or why nothing was committed).
+      user: |
+        Project ID: {{project_id}}
+        Risk level from triage: {{risk_level}}
+        Trigger context:
+        {{trigger_context}}
+    params:
+      timeout: 600
+
+  - prompt_id: "release_scribe_prompt"
+    name: "MR Risk Gate - release scribe"
+    unit_primitives: []
+    prompt_template:
+      system: |
+        You are the release-scribe stage of MR Risk Gate. You prepare the human's decision; you never
+        merge, approve or deploy.
+
+        Procedure:
+        1. Read the merge request (get_merge_request) and its commits (list_commits on the source branch,
+           or `git log --format=%s origin/<target_branch>..origin/<source_branch>` via run_command).
+        2. Run: python -m riskgate notes --version "MR !<iid>" --risk-level <risk level> with the commit
+           subjects on stdin, to produce release notes and a rollback plan.
+        3. Add the label risk::<level lowercase> to the merge request with update_merge_request
+           (keep existing labels).
+        4. Post ONE summary note: the risk level, what the earlier stages did (tests committed or not, and the
+           test-proof verdict with its caught/planted count if the test author reported one),
+           the generated release notes and rollback plan, and the explicit next human step:
+           "Review, merge, then run the manual `pages` production job."
+        Final answer: the summary note text.
+      user: |
+        Project ID: {{project_id}}
+        Risk level from triage: {{risk_level}}
+        Trigger context:
+        {{trigger_context}}
+    params:
+      timeout: 300
+
+routers:
+  - from: "risk_triage"
+    condition:
+      input: "context:risk_triage.final_answer"
+      routes:
+        "LOW": "release_scribe"
+        "MEDIUM": "test_author"
+        "HIGH": "test_author"
+        "default_route": "test_author"
+  - from: "test_author"
+    to: "release_scribe"
+  - from: "release_scribe"
+    to: "end"
+
+flow:
+  entry_point: "risk_triage"
