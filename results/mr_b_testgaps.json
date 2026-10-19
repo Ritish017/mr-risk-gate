@@ -1,0 +1,38 @@
+{
+  "changed_functions": [
+    {
+      "path": "tinyledger/billing.py",
+      "function": "loyalty_discount",
+      "qualname": "loyalty_discount",
+      "lineno": 48,
+      "changed_lines": 4,
+      "referenced_by_tests": false
+    },
+    {
+      "path": "tinyledger/billing.py",
+      "function": "legacy_total",
+      "qualname": "legacy_total",
+      "lineno": 54,
+      "changed_lines": 3,
+      "referenced_by_tests": false
+    }
+  ],
+  "untested": [
+    {
+      "path": "tinyledger/billing.py",
+      "function": "loyalty_discount",
+      "qualname": "loyalty_discount",
+      "lineno": 48,
+      "changed_lines": 4,
+      "referenced_by_tests": false
+    },
+    {
+      "path": "tinyledger/billing.py",
+      "function": "legacy_total",
+      "qualname": "legacy_total",
+      "lineno": 54,
+      "changed_lines": 3,
+      "referenced_by_tests": false
+    }
+  ]
+}
