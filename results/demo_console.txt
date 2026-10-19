@@ -1,0 +1,37 @@
+== MR A: docs only ==
+### 🟢 MR Risk Gate: **LOW** (0/100)
+
+1 files · +3 / -0 lines
+
+No risk signals found.
+
+_Scored deterministically by `riskgate` against `riskgate.json`._
+== MR B: loyalty discount touching money logic, no tests ==
+### 🟡 MR Risk Gate: **MEDIUM** (57/100)
+
+1 files · +11 / -0 lines
+
+| Points | Rule | Why | Where |
+|---:|---|---|---|
+| 25 | `sensitive-path` | touches money calculation (tinyledger/billing.py) | `tinyledger/billing.py` |
+| 20 | `no-test-change` | source changed with no test changes: tinyledger/billing.py |  |
+| 10 | `float-money` | float-money in added line | `tinyledger/billing.py`:56 |
+| 2 | `todo` | todo in added line | `tinyledger/billing.py`:55 |
+
+_Scored deterministically by `riskgate` against `riskgate.json`._
+exit code with --fail-on HIGH: 0
+tinyledger/billing.py:48 loyalty_discount (4 changed lines, no test reference)
+tinyledger/billing.py:54 legacy_total (3 changed lines, no test reference)
+== Test proof: the test-author agent's first attempt (stand-in, see scripts/demo_tests/README.md) ==
+9 passed in 0.55s
+### ⚠️ Test proof: **WEAK**
+Planted **9** bugs on the lines this MR changed; the tests caught **2** (22%). Policy requires ≥ 80%.
+
+== Test proof: second attempt after the gate returned the surviving bugs ==
+11 passed in 0.54s
+### ✅ Test proof: **PROVEN**
+Planted **9** bugs on the lines this MR changed; the tests caught **9** (100%). Policy requires ≥ 80%.
+
+== Release notes + ledger + evidence ==
+<app>/results/public/index.html
+Results written to <app>/results
