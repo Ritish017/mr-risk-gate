@@ -1,0 +1,103 @@
+{
+  "verdict": "PROVEN",
+  "killed": 9,
+  "survived": 0,
+  "total": 9,
+  "kill_ratio": 1.0,
+  "min_kill_ratio": 0.8,
+  "mutants": [
+    {
+      "id": "M1",
+      "path": "tinyledger/billing.py",
+      "line": 50,
+      "operator": "call min->max",
+      "original": "min(Decimal(years), Decimal('15'))",
+      "mutated": "max(Decimal(years), Decimal('15'))",
+      "status": "killed",
+      "seconds": 0.52
+    },
+    {
+      "id": "M2",
+      "path": "tinyledger/billing.py",
+      "line": 50,
+      "operator": "numeric string +1",
+      "original": "'15'",
+      "mutated": "'16'",
+      "status": "killed",
+      "seconds": 0.52
+    },
+    {
+      "id": "M3",
+      "path": "tinyledger/billing.py",
+      "line": 51,
+      "operator": "return None",
+      "original": "return apply_discount(amount, pct)",
+      "mutated": "return None",
+      "status": "killed",
+      "seconds": 0.51
+    },
+    {
+      "id": "M4",
+      "path": "tinyledger/billing.py",
+      "line": 56,
+      "operator": "return None",
+      "original": "return float(amount) * (1 + float(tax) / 100)",
+      "mutated": "return None",
+      "status": "killed",
+      "seconds": 0.51
+    },
+    {
+      "id": "M5",
+      "path": "tinyledger/billing.py",
+      "line": 56,
+      "operator": "binop Mult->Div",
+      "original": "float(amount) * (1 + float(tax) / 100)",
+      "mutated": "float(amount) / (1 + float(tax) / 100)",
+      "status": "killed",
+      "seconds": 0.51
+    },
+    {
+      "id": "M6",
+      "path": "tinyledger/billing.py",
+      "line": 56,
+      "operator": "binop Add->Sub",
+      "original": "1 + float(tax) / 100",
+      "mutated": "1 - float(tax) / 100",
+      "status": "killed",
+      "seconds": 0.51
+    },
+    {
+      "id": "M7",
+      "path": "tinyledger/billing.py",
+      "line": 56,
+      "operator": "number +1",
+      "original": "1",
+      "mutated": "2",
+      "status": "killed",
+      "seconds": 0.51
+    },
+    {
+      "id": "M8",
+      "path": "tinyledger/billing.py",
+      "line": 56,
+      "operator": "binop Div->Mult",
+      "original": "float(tax) / 100",
+      "mutated": "float(tax) * 100",
+      "status": "killed",
+      "seconds": 0.51
+    },
+    {
+      "id": "M9",
+      "path": "tinyledger/billing.py",
+      "line": 56,
+      "operator": "number +1",
+      "original": "100",
+      "mutated": "101",
+      "status": "killed",
+      "seconds": 0.51
+    }
+  ],
+  "baseline_ok": true,
+  "test_command": "/usr/local/bin/python -m pytest -q -x -p no:cacheprovider",
+  "seconds": 5.67
+}
